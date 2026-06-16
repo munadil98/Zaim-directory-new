@@ -1,0 +1,8 @@
+{
+  "name": "Zaim Contact Directory, Constitution, Map",
+  "description": "A contact directory linked to a Google Sheet with quick call and WhatsApp integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
