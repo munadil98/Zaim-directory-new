@@ -4,37 +4,46 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { Phone, MessageCircle, Search, Users, MapPin, Loader2, ExternalLink, Star, BookOpen } from 'lucide-react';
+import { Phone, MessageCircle, Search, Users, MapPin, Loader2, ExternalLink, Star, BookOpen, RefreshCw, Languages, Download, FileSpreadsheet, X, Check } from 'lucide-react';
 import Papa from 'papaparse';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import ConstitutionBook from './components/ConstitutionBook';
 import { centralAmelaData, AmelaMember } from './data/centralAmela';
+import { initialContactsData, Contact } from './data/initialContacts';
+import { matchesDirectoryQuery } from './utils/bengaliSearch';
+import { exportFilteredDirectory } from './utils/exportData';
 
 // Utility for tailwind classes
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-interface Contact {
-  sl: string;
-  majlis: string;
-  name: string;
-  mobile: string;
-  district: string;
-  districtNazem: string;
-  districtNazemMobile: string;
-  region: string;
-  regionNazem: string;
-  regionNazemMobile: string;
-}
-
 const SHEET_URL = 'https://docs.google.com/spreadsheets/d/1n3Xh_NQA8hqLtAocIFc2BmYeq4CDCCgmmdKfDPkdUto/export?format=csv';
 
 export default function App() {
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [amelaContacts, setAmelaContacts] = useState<AmelaMember[]>(centralAmelaData);
-  const [loading, setLoading] = useState(true);
+  const [contacts, setContacts] = useState<Contact[]>(() => {
+    try {
+      const cached = localStorage.getItem('zaeem_directory_cached_contacts');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return initialContactsData;
+  });
+  const [amelaContacts, setAmelaContacts] = useState<AmelaMember[]>(() => {
+    try {
+      const cached = localStorage.getItem('zaeem_amela_cached_contacts');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch (e) {}
+    return centralAmelaData;
+  });
+  const [loading, setLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<'directory' | 'constitution'>('directory');
@@ -42,6 +51,15 @@ export default function App() {
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [selectedRegion, setSelectedRegion] = useState<string | null>(null);
   const [selectedDistrict, setSelectedDistrict] = useState<string | null>(null);
+  const [englishSearchEnabled, setEnglishSearchEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('zaeem_english_search_enabled');
+      return saved === null ? true : saved === 'true';
+    } catch (e) {
+      return true;
+    }
+  });
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   
   const [favorites, setFavorites] = useState<string[]>(() => {
     try {
@@ -59,16 +77,30 @@ export default function App() {
     fetchContacts();
     fetchAmelaContacts();
 
-    window.addEventListener('beforeinstallprompt', (e) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-      setShowInstallBtn(true);
-    });
+    const handleBeforeInstall = (e: Event) => {
+      try {
+        e.preventDefault();
+        setDeferredPrompt(e);
+        setShowInstallBtn(true);
+      } catch (err) {}
+    };
 
-    window.addEventListener('appinstalled', () => {
+    const handleInstalled = () => {
       setShowInstallBtn(false);
       setDeferredPrompt(null);
-    });
+    };
+
+    try {
+      window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.addEventListener('appinstalled', handleInstalled);
+    } catch (e) {}
+
+    return () => {
+      try {
+        window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+        window.removeEventListener('appinstalled', handleInstalled);
+      } catch (e) {}
+    };
   }, []);
 
   // Clear search query when any filter is selected or changed to see all filtered data
@@ -86,10 +118,15 @@ export default function App() {
     }
   };
 
-  const fetchContacts = async () => {
+  const fetchContacts = async (isManual = false) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 9000);
     try {
-      setLoading(true);
-      const response = await fetch(SHEET_URL);
+      if (isManual) {
+        setIsRefreshing(true);
+      }
+      const response = await fetch(SHEET_URL, { signal: controller.signal });
+      clearTimeout(timeoutId);
       const csvText = await response.text();
       
       Papa.parse(csvText, {
@@ -111,27 +148,40 @@ export default function App() {
                 regionNazemMobile: row[9] || '',
               }));
             
-            setContacts(parsedContacts);
-          } else {
-            setError('শিটে কোনো তথ্য পাওয়া যায়নি');
+            if (parsedContacts.length > 0) {
+              setContacts(parsedContacts);
+              setError(null);
+              try {
+                localStorage.setItem('zaeem_directory_cached_contacts', JSON.stringify(parsedContacts));
+              } catch (e) {
+                console.warn('Failed to cache contacts', e);
+              }
+            }
           }
           setLoading(false);
+          setIsRefreshing(false);
         },
         error: (err: any) => {
-          setError('Failed to parse contact data');
+          console.error('CSV parse error', err);
           setLoading(false);
+          setIsRefreshing(false);
         }
       });
-    } catch (err) {
-      setError('Failed to fetch contacts');
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      console.warn('Contacts fetch notice/fallback:', err.name === 'AbortError' ? 'Fetch timeout, using offline data' : err);
       setLoading(false);
+      setIsRefreshing(false);
     }
   };
 
   const fetchAmelaContacts = async () => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 9000);
     try {
       const amelaUrl = 'https://docs.google.com/spreadsheets/d/1n3Xh_NQA8hqLtAocIFc2BmYeq4CDCCgmmdKfDPkdUto/export?format=csv&gid=1476923702';
-      const response = await fetch(amelaUrl);
+      const response = await fetch(amelaUrl, { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (!response.ok) {
         console.warn('Could not fetch online Amela directory, using built-in data.');
         return;
@@ -173,6 +223,9 @@ export default function App() {
             
             if (parsed.length > 0) {
               setAmelaContacts(parsed);
+              try {
+                localStorage.setItem('zaeem_amela_cached_contacts', JSON.stringify(parsed));
+              } catch (e) {}
               console.log('Successfully fetched and parsed Amela contacts:', parsed.length);
             }
           }
@@ -182,7 +235,8 @@ export default function App() {
         }
       });
     } catch (err) {
-      console.error('Fetch error for Amela', err);
+      clearTimeout(timeoutId);
+      console.warn('Fetch notice for Amela, using local data', err);
     }
   };
 
@@ -268,19 +322,18 @@ export default function App() {
       filtered = filtered.filter(contact => isFavorite(contact.name, contact.mobile, 'zaeem'));
     }
 
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(contact => 
-        (contact.name || '').toLowerCase().includes(query) ||
-        (contact.majlis || '').toLowerCase().includes(query) ||
-        (contact.district || '').toLowerCase().includes(query) ||
-        (contact.region || '').toLowerCase().includes(query) ||
-        (contact.mobile || '').includes(query)
+    if (searchQuery.trim()) {
+      filtered = filtered.filter(contact =>
+        matchesDirectoryQuery(
+          [contact.name, contact.majlis, contact.district, contact.region, contact.mobile],
+          searchQuery,
+          englishSearchEnabled
+        )
       );
     }
 
     return filtered;
-  }, [contacts, searchQuery, showFavoritesOnly, favorites, selectedDistrict, selectedRegion]);
+  }, [contacts, searchQuery, showFavoritesOnly, favorites, selectedDistrict, selectedRegion, englishSearchEnabled]);
 
   const filteredDistrictNazems = useMemo(() => {
     let filtered = districtNazems;
@@ -293,14 +346,15 @@ export default function App() {
       filtered = filtered.filter(n => isFavorite(n.name, n.mobile, 'district'));
     }
 
-    if (!searchQuery) return filtered;
-    const query = searchQuery.toLowerCase();
-    return filtered.filter(n => 
-      n.name.toLowerCase().includes(query) || 
-      n.district.toLowerCase().includes(query) ||
-      n.mobile.includes(query)
+    if (!searchQuery.trim()) return filtered;
+    return filtered.filter(n =>
+      matchesDirectoryQuery(
+        [n.name, n.district, n.region, n.mobile],
+        searchQuery,
+        englishSearchEnabled
+      )
     );
-  }, [districtNazems, searchQuery, showFavoritesOnly, favorites, selectedRegion]);
+  }, [districtNazems, searchQuery, showFavoritesOnly, favorites, selectedRegion, englishSearchEnabled]);
 
   const filteredRegionNazems = useMemo(() => {
     let filtered = regionNazems;
@@ -309,14 +363,15 @@ export default function App() {
       filtered = filtered.filter(n => isFavorite(n.name, n.mobile, 'region'));
     }
 
-    if (!searchQuery) return filtered;
-    const query = searchQuery.toLowerCase();
-    return filtered.filter(n => 
-      n.name.toLowerCase().includes(query) || 
-      n.region.toLowerCase().includes(query) ||
-      n.mobile.includes(query)
+    if (!searchQuery.trim()) return filtered;
+    return filtered.filter(n =>
+      matchesDirectoryQuery(
+        [n.name, n.region, n.mobile],
+        searchQuery,
+        englishSearchEnabled
+      )
     );
-  }, [regionNazems, searchQuery, showFavoritesOnly, favorites]);
+  }, [regionNazems, searchQuery, showFavoritesOnly, favorites, englishSearchEnabled]);
 
   const filteredAmelaContacts = useMemo(() => {
     let filtered = amelaContacts;
@@ -325,28 +380,29 @@ export default function App() {
       filtered = filtered.filter(contact => isFavorite(contact.name, contact.mobile, 'amela'));
     }
 
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(contact => 
-        (contact.name || '').toLowerCase().includes(query) ||
-        (contact.designation || '').toLowerCase().includes(query) ||
-        (contact.mobile || '').includes(query)
+    if (searchQuery.trim()) {
+      filtered = filtered.filter(contact =>
+        matchesDirectoryQuery(
+          [contact.name, contact.designation, contact.mobile],
+          searchQuery,
+          englishSearchEnabled
+        )
       );
     }
 
     return filtered;
-  }, [amelaContacts, searchQuery, showFavoritesOnly, favorites]);
+  }, [amelaContacts, searchQuery, showFavoritesOnly, favorites, englishSearchEnabled]);
 
   const handleWhatsApp = (contact: any, type: 'zaeem' | 'amela' | 'district' | 'region' = 'zaeem') => {
     let message = '';
     if (type === 'zaeem') {
-      message = `আসসালামু আলাইকুম\n জনাব ${contact.name}\n যয়িম(আলা) ${contact.majlis} মজলিস।`;
+      message = `আসসালামু আলাইকুম\nজনাব ${contact.name}\nযয়িম(আলা) ${contact.majlis} মজলিস।\n`;
     } else if (type === 'amela') {
-      message = `আসসালামু আলাইকুম\n জনাব ${contact.name}\n ${contact.designation}।`;
+      message = `আসসালামু আলাইকুম\nজনাব ${contact.name}\n${contact.designation}।\n`;
     } else if (type === 'district') {
-      message = `আসসালামু আলাইকুম\n জনাব ${contact.name}\n জেলা নাযেম-আলা, ${contact.district} জেলা।`;
+      message = `আসসালামু আলাইকুম\nজনাব ${contact.name}\nজেলা নাযেম-আলা, ${contact.district} জেলা।\n`;
     } else if (type === 'region') {
-      message = `আসসালামু আলাইকুম\n জনাব ${contact.name}\n রিজিওন নাযেম-আলা, ${contact.region} রিজিওন।`;
+      message = `আসসালামু আলাইকুম\nজনাব ${contact.name}\nরিজিওন নাযেম-আলা, ${contact.region} রিজিওন।\n`;
     }
     const encodedMessage = encodeURIComponent(message);
     const phone = (contact.mobile || '').replace(/\D/g, '');
@@ -362,6 +418,34 @@ export default function App() {
     setSearchQuery('');
   };
 
+  const toggleEnglishSearch = () => {
+    setEnglishSearchEnabled(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('zaeem_english_search_enabled', String(next));
+      } catch (e) {}
+      return next;
+    });
+  };
+
+  const handleExport = (format: 'xlsx' | 'csv') => {
+    const count = exportFilteredDirectory(format, {
+      view: currentView,
+      contacts: filteredContacts,
+      amelaContacts: filteredAmelaContacts,
+      districtNazems: filteredDistrictNazems,
+      regionNazems: filteredRegionNazems,
+      selectedRegion,
+      selectedDistrict,
+      showFavoritesOnly,
+    });
+    if (count > 0) {
+      const label = format === 'xlsx' ? 'Excel' : 'CSV';
+      setExportNotice(`${count}টি তথ্য ${label}-এ এক্সপোর্ট হয়েছে`);
+      setTimeout(() => setExportNotice(null), 2600);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#f5f5f5] text-[#1a1a1a] font-sans pb-24">
       {/* Header */}
@@ -372,17 +456,28 @@ export default function App() {
               <h1 className="text-2xl font-semibold tracking-tight text-gray-900">যয়ীম ডিরেক্টরি</h1>
               <p className="text-sm text-muted mt-1">মজলিস আনসারুল্লাহ্, বাংলাদেশ</p>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  fetchContacts(true);
+                  fetchAmelaContacts();
+                }}
+                disabled={isRefreshing}
+                className="p-2.5 rounded-xl text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 active:scale-95 transition-all cursor-pointer"
+                title="তথ্য রিফ্রেশ করুন"
+              >
+                <RefreshCw className={cn("w-5 h-5", isRefreshing && "animate-spin text-emerald-600")} />
+              </button>
               {showInstallBtn && (
                 <button
                   onClick={handleInstallClick}
-                  className="bg-emerald-600 text-white px-4 py-2 rounded-xl text-sm font-semibold shadow-sm hover:bg-emerald-700 transition-colors"
+                  className="bg-emerald-600 text-white px-3.5 py-2 rounded-xl text-xs font-semibold shadow-sm hover:bg-emerald-700 transition-colors"
                 >
                   ইন্সটল করুন
                 </button>
               )}
-              <div className="bg-emerald-50 p-3 rounded-2xl">
-                <Users className="w-6 h-6 text-emerald-600" />
+              <div className="bg-emerald-50 p-2.5 rounded-2xl">
+                <Users className="w-5 h-5 text-emerald-600" />
               </div>
             </div>
           </div>
@@ -479,15 +574,36 @@ export default function App() {
                 <input
                   type="text"
                   placeholder={
-                    currentView === 'directory' ? "নাম, মজলিস বা জেলা দিয়ে খুঁজুন..." :
-                    currentView === 'amela' ? "নাম বা পদবী দিয়ে খুঁজুন..." :
-                    currentView === 'district-nazem' ? "নাম বা জেলা দিয়ে খুঁজুন..." :
-                    "নাম বা রিজিওন দিয়ে খুঁজুন..."
+                    englishSearchEnabled
+                      ? currentView === 'directory'
+                        ? "নাম, মজলিস, জেলা বা ইংরেজিতে (যেমন: dhaka) খুঁজুন..."
+                        : currentView === 'amela'
+                        ? "নাম, পদবী বা ইংরেজিতে খুঁজুন..."
+                        : currentView === 'district-nazem'
+                        ? "নাম, জেলা বা ইংরেজিতে (যেমন: dhaka) খুঁজুন..."
+                        : "নাম, রিজিওন বা ইংরেজিতে খুঁজুন..."
+                      : currentView === 'directory'
+                      ? "নাম, মজলিস বা জেলা দিয়ে খুঁজুন..."
+                      : currentView === 'amela'
+                      ? "নাম বা পদবী দিয়ে খুঁজুন..."
+                      : currentView === 'district-nazem'
+                      ? "নাম বা জেলা দিয়ে খুঁজুন..."
+                      : "নাম বা রিজিওন দিয়ে খুঁজুন..."
                   }
-                  className="w-full bg-gray-100 border-none rounded-2xl py-4 pl-12 pr-4 focus:ring-2 focus:ring-emerald-500/20 focus:bg-white transition-all outline-none text-base"
+                  className="w-full bg-gray-100 border-none rounded-2xl py-4 pl-12 pr-11 focus:ring-2 focus:ring-emerald-500/20 focus:bg-white transition-all outline-none text-base"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    aria-label="সার্চ মুছুন"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-full text-gray-400 hover:text-gray-700 hover:bg-gray-200/70 transition-colors cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
               </div>
 
               {/* Region and Zilla Filter Dropdowns */}
@@ -548,20 +664,38 @@ export default function App() {
                 </div>
               )}
 
-              {/* Favorites filter option */}
-              <div className="flex items-center justify-between mt-3 px-1">
-                <button
-                  onClick={() => setShowFavoritesOnly(prev => !prev)}
-                  className={cn(
-                    "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer",
-                    showFavoritesOnly 
-                      ? "bg-amber-500 text-white border-amber-600 shadow-md shadow-amber-100" 
-                      : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
-                  )}
-                >
-                  <Star className={cn("w-3.5 h-3.5", showFavoritesOnly ? "text-white fill-white shadow-sm" : "text-amber-500")} />
-                  <span>{showFavoritesOnly ? 'শুধু প্রিয় (চালু)' : 'শুধু প্রিয় তালিকা'}</span>
-                </button>
+              {/* Favorites & English Search options */}
+              <div className="flex flex-wrap items-center justify-between gap-2 mt-3 px-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => setShowFavoritesOnly(prev => !prev)}
+                    className={cn(
+                      "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer",
+                      showFavoritesOnly 
+                        ? "bg-amber-500 text-white border-amber-600 shadow-md shadow-amber-100" 
+                        : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
+                    )}
+                  >
+                    <Star className={cn("w-3.5 h-3.5", showFavoritesOnly ? "text-white fill-white shadow-sm" : "text-amber-500")} />
+                    <span>{showFavoritesOnly ? 'শুধু প্রিয় (চালু)' : 'শুধু প্রিয় তালিকা'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={toggleEnglishSearch}
+                    title="ইংরেজি অক্ষরে বাংলা তথ্য খুঁজুন (যেমন: dhaka লিখে ঢাকা)"
+                    className={cn(
+                      "flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all cursor-pointer",
+                      englishSearchEnabled
+                        ? "bg-emerald-600 text-white border-emerald-700 shadow-sm shadow-emerald-100"
+                        : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
+                    )}
+                  >
+                    <Languages className={cn("w-3.5 h-3.5", englishSearchEnabled ? "text-white" : "text-emerald-600")} />
+                    <span>{englishSearchEnabled ? 'English সার্চ: চালু' : 'English সার্চ: বন্ধ'}</span>
+                  </button>
+                </div>
+
                 {showFavoritesOnly && (
                   <span className="text-xs text-amber-600 bg-amber-50/70 border border-amber-100 px-2 py-1 rounded-lg font-medium animate-fade-in">
                     প্রিয় তালিকা ফিল্টার করা রয়েছে
@@ -641,7 +775,7 @@ export default function App() {
           <div className="bg-red-50 border border-red-100 rounded-2xl p-6 text-center">
             <p className="text-red-600 font-medium">{error}</p>
             <button 
-              onClick={fetchContacts}
+              onClick={() => fetchContacts(true)}
               className="mt-4 text-sm font-semibold text-red-700 underline underline-offset-4"
             >
               আবার চেষ্টা করুন
@@ -653,10 +787,38 @@ export default function App() {
               <>
                 {currentView === 'directory' && (
                   <>
-                <div className="flex items-center justify-between px-2 mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-2 mb-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted">
                     মোট {filteredContacts.length} জন পাওয়া গেছে
                   </span>
+                  {filteredContacts.length > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      {exportNotice && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg">
+                          <Check className="w-3 h-3" />
+                          {exportNotice}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleExport('xlsx')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য Excel (.xlsx) হিসেবে ডাউনলোড করুন"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Excel</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExport('csv')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-gray-700 border border-gray-200 hover:bg-gray-50 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য CSV (.csv) হিসেবে ডাউনলোড করুন"
+                      >
+                        <Download className="w-3.5 h-3.5 text-gray-600" />
+                        <span>CSV</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {filteredContacts.length > 0 ? (
@@ -747,10 +909,38 @@ export default function App() {
 
             {currentView === 'amela' && (
               <>
-                <div className="flex items-center justify-between px-2 mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-2 mb-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted">
                     মোট {filteredAmelaContacts.length} জন পাওয়া গেছে
                   </span>
+                  {filteredAmelaContacts.length > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      {exportNotice && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg">
+                          <Check className="w-3 h-3" />
+                          {exportNotice}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleExport('xlsx')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য Excel (.xlsx) হিসেবে ডাউনলোড করুন"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Excel</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExport('csv')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-gray-700 border border-gray-200 hover:bg-gray-50 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য CSV (.csv) হিসেবে ডাউনলোড করুন"
+                      >
+                        <Download className="w-3.5 h-3.5 text-gray-600" />
+                        <span>CSV</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {filteredAmelaContacts.length > 0 ? (
@@ -840,10 +1030,38 @@ export default function App() {
 
             {currentView === 'district-nazem' && (
               <>
-                <div className="flex items-center justify-between px-2 mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-2 mb-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted">
                     মোট {filteredDistrictNazems.length} জন জেলা নাযেম-আলা ডিরেক্টরি পাওয়া গেছে
                   </span>
+                  {filteredDistrictNazems.length > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      {exportNotice && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg">
+                          <Check className="w-3 h-3" />
+                          {exportNotice}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleExport('xlsx')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য Excel (.xlsx) হিসেবে ডাউনলোড করুন"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Excel</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExport('csv')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-gray-700 border border-gray-200 hover:bg-gray-50 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য CSV (.csv) হিসেবে ডাউনলোড করুন"
+                      >
+                        <Download className="w-3.5 h-3.5 text-gray-600" />
+                        <span>CSV</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {filteredDistrictNazems.length > 0 ? (
@@ -947,10 +1165,38 @@ export default function App() {
 
             {currentView === 'region-nazem' && (
               <>
-                <div className="flex items-center justify-between px-2 mb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-2 mb-2">
                   <span className="text-xs font-semibold uppercase tracking-wider text-muted">
                     মোট {filteredRegionNazems.length} জন রিজিওন নাযেম-আলা ডিরেক্টরি পাওয়া গেছে
                   </span>
+                  {filteredRegionNazems.length > 0 && (
+                    <div className="flex items-center gap-1.5">
+                      {exportNotice && (
+                        <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-lg">
+                          <Check className="w-3 h-3" />
+                          {exportNotice}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleExport('xlsx')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য Excel (.xlsx) হিসেবে ডাউনলোড করুন"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Excel</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExport('csv')}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white text-gray-700 border border-gray-200 hover:bg-gray-50 active:scale-[0.98] transition-all cursor-pointer"
+                        title="ফিল্টার করা তথ্য CSV (.csv) হিসেবে ডাউনলোড করুন"
+                      >
+                        <Download className="w-3.5 h-3.5 text-gray-600" />
+                        <span>CSV</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {filteredRegionNazems.length > 0 ? (
